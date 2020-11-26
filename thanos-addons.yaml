@@ -1,0 +1,210 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thanos-querier
+  namespace: istio-system
+  labels:
+    app: thanos-querier
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: thanos-querier
+  template:
+    metadata:
+      labels:
+        app: thanos-querier
+    spec:
+      containers:
+      - name: thanos
+        image: quay.io/thanos/thanos:v0.16.0
+        args:
+        - query
+        - --log.level=debug
+        - --query.replica-label=replica
+        - --store=dnssrv+thanos-store-gateway:10901
+        ports:
+        - name: http
+          containerPort: 10902
+        - name: grpc
+          containerPort: 10901
+        livenessProbe:
+          httpGet:
+            port: http
+            path: /-/healthy
+        readinessProbe:
+          httpGet:
+            port: http
+            path: /-/ready
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: thanos-querier
+  name: thanos-querier
+  namespace: istio-system
+spec:
+  ports:
+  - port: 9090
+    protocol: TCP
+    targetPort: http
+    name: http
+  selector:
+    app: thanos-querier
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: thanos-store-gateway
+  namespace: istio-system
+  labels:
+    app: thanos-store-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: thanos-store-gateway
+  serviceName: thanos-store-gateway
+  template:
+    metadata:
+      labels:
+        app: thanos-store-gateway
+        thanos-store-api: "true"
+    spec:
+      containers:
+        - name: thanos
+          image: quay.io/thanos/thanos:v0.16.0
+          args:
+            - "store"
+            - "--log.level=debug"
+            - "--data-dir=/data"
+            - "--objstore.config-file=/etc/config/thanos/thanos-storage-config.yaml"
+            - "--index-cache-size=500MB"
+            - "--chunk-pool-size=500MB"
+#          env:
+#            - name : GOOGLE_APPLICATION_CREDENTIALS
+#              value: /etc/secret/thanos-gcs-credentials.json
+          ports:
+          - name: http
+            containerPort: 10902
+          - name: grpc
+            containerPort: 10901
+          livenessProbe:
+            httpGet:
+              port: 10902
+              path: /-/healthy
+          readinessProbe:
+            httpGet:
+              port: 10902
+              path: /-/ready
+          volumeMounts:
+            - name: thanos-storage-config
+              mountPath: /etc/config/thanos
+              readOnly: false
+      volumes:
+        - name: thanos-storage-config
+          configMap:
+            name: thanos-storage-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: thanos-ruler-rules
+  namespace: istio-system
+data:
+  alert_down_services.rules.yaml: |
+    groups:
+    - name: metamonitoring
+      rules:
+      - alert: PrometheusReplicaDown
+        annotations:
+          message: Prometheus replica in cluster {{$labels.cluster}} has disappeared from Prometheus target discovery.
+        expr: |
+          sum(up{cluster="prometheus-ha", instance=~".*:9090", job="kubernetes-service-endpoints"}) by (job,cluster) < 4
+        for: 15s
+        labels:
+          severity: critical
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app: thanos-ruler
+  name: thanos-ruler
+  namespace: istio-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: thanos-ruler
+  serviceName: thanos-ruler
+  template:
+    metadata:
+      labels:
+        app: thanos-ruler
+        thanos-store-api: "true"
+    spec:
+      containers:
+        - name: thanos
+          image: quay.io/thanos/thanos:v0.16.0
+          args:
+            - rule
+            - --log.level=debug
+            - --data-dir=/data
+            - --eval-interval=15s
+            - --rule-file=/etc/thanos-ruler/*.rules.yaml
+            - --alertmanagers.url=http://alertmanager:9093
+            - --query=thanos-querier:9090
+            - "--objstore.config-file=/etc/config/thanos/thanos-storage-config.yaml"
+            - --label=ruler_cluster="prometheus-ha"
+            - --label=replica="$(POD_NAME)"
+          env:
+#            - name : GOOGLE_APPLICATION_CREDENTIALS
+#              value: /etc/secret/thanos-gcs-credentials.json
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: http
+              containerPort: 10902
+            - name: grpc
+              containerPort: 10901
+          livenessProbe:
+            httpGet:
+              port: http
+              path: /-/healthy
+          readinessProbe:
+            httpGet:
+              port: http
+              path: /-/ready
+          volumeMounts:
+            - mountPath: /etc/thanos-ruler
+              name: config
+            - name: thanos-storage-config
+              mountPath: /etc/config/thanos
+              readOnly: false
+      volumes:
+        - name: config
+          configMap:
+            name: thanos-ruler-rules
+        - name: thanos-storage-config
+          configMap:
+            name: thanos-storage-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: thanos-ruler
+  name: thanos-ruler
+  namespace: istio-system
+spec:
+  ports:
+    - port: 9090
+      protocol: TCP
+      targetPort: http
+      name: http
+  selector:
+    app: thanos-ruler
