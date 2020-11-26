@@ -7,19 +7,6 @@ metadata:
 provisioner: kubernetes.io/aws-ebs
 allowVolumeExpansion: true
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: prometheus-storage
-  namespace: istio-system
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1000Gi
-  storageClassName: fast
----
 # Source: prometheus/templates/server-serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -631,9 +618,6 @@ spec:
         runAsUser: 65534
       terminationGracePeriodSeconds: 300
       volumes:
-        - name: prometheus-storage
-          persistentVolumeClaim:
-            claimName: prometheus-storage
         - name: prometheus-config
           configMap:
             name: prometheus
@@ -645,5 +629,14 @@ spec:
         - name: thanos-storage-config
           configMap:
             name: thanos-storage-config
+  volumeClaimTemplates:
+  - metadata:
+      name: prometheus-storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 500Gi
+      storageClassName: fast
 ---
 
